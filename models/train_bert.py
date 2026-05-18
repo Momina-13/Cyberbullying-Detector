@@ -4,110 +4,153 @@ Run: python train_bert.py
 NOTE: First run: pip install transformers torch pandas numpy
 """
 
+import os
+import sys
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import pandas as pd
-import numpy as np
-import sys
-import os
+from torch.utils.data import DataLoader
+from transformers import BertTokenizer
+
+# Make sure imports work when running from this folder
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from transformers import BertTokenizer
-from torch.utils.data import DataLoader
 from bert_model import BertClassifier, CyberbullyingDataset
 from evaluate import compute_metrics, print_metrics
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MAX_LEN    = 128
+MAX_LEN = 128
 BATCH_SIZE = 16
-EPOCHS     = 3
-LR         = 2e-5
-DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+EPOCHS = 3
+LR = 2e-5
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 print("Loading data...")
-train = pd.read_csv('../dataset/train.csv')
-val   = pd.read_csv('../dataset/val.csv')
-test  = pd.read_csv('../dataset/test.csv')
+train = pd.read_csv("../dataset/train.csv")
+val = pd.read_csv("../dataset/val.csv")
+test = pd.read_csv("../dataset/test.csv")
+
+# Safety check for required columns
+for name, df in [("train", train), ("val", val), ("test", test)]:
+    if "text" not in df.columns or "label" not in df.columns:
+        raise ValueError(
+            f"{name}.csv must contain columns: text, label. Found: {list(df.columns)}"
+        )
 
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
 print("Loading BERT tokenizer...")
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 # ── Datasets and DataLoaders ──────────────────────────────────────────────────
-train_dataset = CyberbullyingDataset(train['text'].tolist(), train['label'].tolist(), tokenizer, MAX_LEN)
-val_dataset   = CyberbullyingDataset(val['text'].tolist(),   val['label'].tolist(),   tokenizer, MAX_LEN)
-test_dataset  = CyberbullyingDataset(test['text'].tolist(),  test['label'].tolist(),  tokenizer, MAX_LEN)
+train_dataset = CyberbullyingDataset(
+    train["text"].tolist(), train["label"].tolist(), tokenizer, MAX_LEN
+)
+val_dataset = CyberbullyingDataset(
+    val["text"].tolist(), val["label"].tolist(), tokenizer, MAX_LEN
+)
+test_dataset = CyberbullyingDataset(
+    test["text"].tolist(), test["label"].tolist(), tokenizer, MAX_LEN
+)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE)
-test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 print("Loading BERT model with custom classification head...")
-model = BertClassifier('bert-base-uncased').to(DEVICE)
+model = BertClassifier("bert-base-uncased").to(DEVICE)
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 print("\nFine-tuning BERT...")
-os.makedirs('../saved_models', exist_ok=True)
-best_val_f1 = 0
+os.makedirs("../saved_models", exist_ok=True)
+best_val_f1 = -1.0
 
 for epoch in range(EPOCHS):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
 
     for batch_idx, batch in enumerate(train_loader):
-        input_ids      = batch['input_ids'].to(DEVICE)
-        attention_mask = batch['attention_mask'].to(DEVICE)
-        labels         = batch['label'].to(DEVICE)
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        labels = batch["label"].to(DEVICE)
 
         optimizer.zero_grad()
         logits = model(input_ids, attention_mask)
-        loss   = criterion(logits, labels)
+        loss = criterion(logits, labels)
         loss.backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+
         total_loss += loss.item()
 
         if (batch_idx + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1} | Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
+            print(
+                f"  Epoch {epoch+1} | Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}"
+            )
 
-    # Validation
+    # ── Validation ────────────────────────────────────────────────────────────
     model.eval()
     val_preds, val_true = [], []
     with torch.no_grad():
         for batch in val_loader:
-            input_ids      = batch['input_ids'].to(DEVICE)
-            attention_mask = batch['attention_mask'].to(DEVICE)
-            labels         = batch['label']
+            input_ids = batch["input_ids"].to(DEVICE)
+            attention_mask = batch["attention_mask"].to(DEVICE)
+            labels_cpu = batch["label"].cpu().numpy().astype(int)
+
             logits = model(input_ids, attention_mask)
-            preds  = (torch.sigmoid(logits) >= 0.5).cpu().numpy().astype(int)
+            preds = (torch.sigmoid(logits) >= 0.5).cpu().numpy().astype(int)
+
             val_preds.extend(preds)
-            val_true.extend(labels.numpy().astype(int))
+            val_true.extend(labels_cpu)
 
     m = compute_metrics(val_true, val_preds)
-    print(f"\nEpoch {epoch+1}/{EPOCHS} | Avg Loss: {total_loss/len(train_loader):.4f} | Val F1: {m['F1-Score']}%\n")
+    avg_loss = total_loss / max(len(train_loader), 1)
+    print(
+        f"\nEpoch {epoch+1}/{EPOCHS} | Avg Loss: {avg_loss:.4f} | Val F1: {m['F1-Score']}%\n"
+    )
 
-    if m['F1-Score'] > best_val_f1:
-        best_val_f1 = m['F1-Score']
-        torch.save(model.state_dict(), '../saved_models/bert_model.pt')
+    if m["F1-Score"] > best_val_f1:
+        best_val_f1 = m["F1-Score"]
+        torch.save(model.state_dict(), "../saved_models/bert_model.pt")
         print(f"  --> Best model saved (Val F1: {best_val_f1}%)")
 
 # ── Test evaluation ───────────────────────────────────────────────────────────
 print("\nLoading best model for test evaluation...")
-model.load_state_dict(torch.load('../saved_models/bert_model.pt', map_location=DEVICE))
+model.load_state_dict(
+    torch.load("../saved_models/bert_model.pt", map_location=DEVICE)
+)
 model.eval()
 
 test_preds, test_true = [], []
 with torch.no_grad():
     for batch in test_loader:
-        input_ids      = batch['input_ids'].to(DEVICE)
-        attention_mask = batch['attention_mask'].to(DEVICE)
-        labels         = batch['label']
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        labels_cpu = batch["label"].cpu().numpy().astype(int)
+
         logits = model(input_ids, attention_mask)
-        preds  = (
-
+        preds = (torch.sigmoid(logits) >= 0.5).cpu().numpy().astype(int)
+
+        test_preds.extend(preds)
+        test_true.extend(labels_cpu)
+
+test_metrics = compute_metrics(test_true, test_preds)
+print_metrics("BERT — Test", test_metrics)
+
+results = {
+    "Model": "BERT",
+    "Accuracy": test_metrics["Accuracy"],
+    "Precision": test_metrics["Precision"],
+    "Recall": test_metrics["Recall"],
+    "F1-Score": test_metrics["F1-Score"],
+}
+pd.DataFrame([results]).to_csv("../saved_models/bert_results.csv", index=False)
+print("Results saved to saved_models/bert_results.csv")
