@@ -6,7 +6,7 @@
 
 ## 📌 Overview
 
-Cyberbullying is a growing crisis on platforms like Instagram, Twitter, TikTok, and WhatsApp — affecting millions of users, especially teenagers. Manual content moderation is slow, costly, and harmful to human reviewers. This project builds an automated pipeline that classifies social media text as **Cyberbullying** or **Normal** using three progressively powerful models: Logistic Regression, LSTM, and fine-tuned BERT.
+Cyberbullying is a growing crisis on platforms like Youtube, Reddit and Twitter — affecting millions of users, especially teenagers. Manual content moderation is slow, costly, and harmful to human reviewers. This project builds an automated pipeline that classifies social media text as **Cyberbullying** or **Normal** using three progressively powerful models: Logistic Regression, LSTM, and fine-tuned BERT.
 
 ---
 
